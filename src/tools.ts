@@ -3,15 +3,9 @@ import { z } from "zod";
 import { readHistory, readStatus } from "./store.js";
 import { runFullPull } from "./pull.js";
 
-// Define schemas outside registerTool to avoid TypeScript infinite recursion
-const QuerySchema = z.object({
-  type: z.enum(["recovery", "sleep", "cycles", "workouts"]).describe("Data type to query"),
-  start: z.string().optional().describe("Start date YYYY-MM-DD (default: 90 days ago)"),
-  end: z.string().optional().describe("End date YYYY-MM-DD (default: today)"),
-});
-
 export function registerTools(server: McpServer): void {
 
+  // ─── Full History Pull ────────────────────────────────────────────────────
   server.registerTool(
     "whoop_full_history",
     {
@@ -23,13 +17,20 @@ export function registerTools(server: McpServer): void {
     async () => {
       const status = readStatus();
       if (status.inProgress) {
-        return { content: [{ type: "text" as const, text: "Pull already in progress. Use whoop_history_status to check progress." }] };
+        return {
+          content: [{ type: "text" as const, text: "Pull already in progress. Use whoop_history_status to check progress." }],
+        };
       }
+
       runFullPull().catch((err: unknown) => console.error("[tools] Pull error:", err));
-      return { content: [{ type: "text" as const, text: "Full history pull started. Runs in background — may take 1-3 minutes.\n\nUse whoop_history_status to check progress." }] };
+
+      return {
+        content: [{ type: "text" as const, text: "Full history pull started. Runs in background — may take 1-3 minutes.\n\nUse whoop_history_status to check progress." }],
+      };
     }
   );
 
+  // ─── Status ───────────────────────────────────────────────────────────────
   server.registerTool(
     "whoop_history_status",
     {
@@ -40,6 +41,7 @@ export function registerTools(server: McpServer): void {
     },
     async () => {
       const status = readStatus();
+
       const lines = [
         "WHOOP HISTORY PULL STATUS",
         "=========================",
@@ -54,10 +56,14 @@ export function registerTools(server: McpServer): void {
         "  Sleeps:     " + status.counts.sleeps,
         "  Workouts:   " + status.counts.workouts,
       ];
-      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+      };
     }
   );
 
+  // ─── Summary ──────────────────────────────────────────────────────────────
   server.registerTool(
     "whoop_history_summary",
     {
@@ -69,7 +75,10 @@ export function registerTools(server: McpServer): void {
     async () => {
       const history = readHistory();
       if (!history) {
-        return { content: [{ type: "text" as const, text: "No history data found. Run whoop_full_history first." }], isError: true };
+        return {
+          content: [{ type: "text" as const, text: "No history data found. Run whoop_full_history first." }],
+          isError: true,
+        };
       }
 
       const cycleStarts = history.cycles
@@ -80,20 +89,26 @@ export function registerTools(server: McpServer): void {
       const latest = cycleStarts[cycleStarts.length - 1]?.split("T")[0] ?? "unknown";
       const spanMonths = Math.round(cycleStarts.length / 30);
 
-      const avg = (nums: number[]): string =>
-        nums.length ? (nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(1) : "N/A";
-
       const recoveryScores = history.recoveries
         .map((r) => ((r as { score?: { recovery_score?: number } }).score?.recovery_score))
         .filter((n): n is number => typeof n === "number");
+      const avgRecovery = recoveryScores.length
+        ? (recoveryScores.reduce((a, b) => a + b, 0) / recoveryScores.length).toFixed(1)
+        : "N/A";
 
       const hrvValues = history.recoveries
         .map((r) => ((r as { score?: { hrv_rmssd_milli?: number } }).score?.hrv_rmssd_milli))
         .filter((n): n is number => typeof n === "number");
+      const avgHRV = hrvValues.length
+        ? (hrvValues.reduce((a, b) => a + b, 0) / hrvValues.length).toFixed(1)
+        : "N/A";
 
       const sleepScores = history.sleeps
         .map((s) => ((s as { score?: { sleep_performance_percentage?: number } }).score?.sleep_performance_percentage))
         .filter((n): n is number => typeof n === "number");
+      const avgSleepPerf = sleepScores.length
+        ? (sleepScores.reduce((a, b) => a + b, 0) / sleepScores.length).toFixed(1)
+        : "N/A";
 
       const sleepHours = history.sleeps
         .map((s) => {
@@ -102,6 +117,9 @@ export function registerTools(server: McpServer): void {
           return (st.total_in_bed_time_milli - (st.total_awake_time_milli ?? 0)) / 3600000;
         })
         .filter((n): n is number => n !== null);
+      const avgSleepHrs = sleepHours.length
+        ? (sleepHours.reduce((a, b) => a + b, 0) / sleepHours.length).toFixed(1)
+        : "N/A";
 
       const lines = [
         "WHOOP FULL HISTORY SUMMARY",
@@ -117,15 +135,26 @@ export function registerTools(server: McpServer): void {
         "  Workouts:   " + history.workouts.length,
         "",
         "LIFETIME AVERAGES",
-        "  Recovery Score:    " + avg(recoveryScores) + "%",
-        "  HRV (RMSSD):       " + avg(hrvValues) + " ms",
-        "  Sleep Performance: " + avg(sleepScores) + "%",
-        "  Sleep Duration:    " + avg(sleepHours) + " hrs",
+        "  Recovery Score:    " + avgRecovery + "%",
+        "  HRV (RMSSD):       " + avgHRV + " ms",
+        "  Sleep Performance: " + avgSleepPerf + "%",
+        "  Sleep Duration:    " + avgSleepHrs + " hrs",
       ];
 
-      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+      };
     }
   );
+
+  // ─── Raw Query ────────────────────────────────────────────────────────────
+  const QuerySchema = z.object({
+    type: z.enum(["recovery", "sleep", "cycles", "workouts"]),
+    start: z.string().optional(),
+    end: z.string().optional(),
+  });
+
+  type QueryParams = z.infer<typeof QuerySchema>;
 
   server.registerTool(
     "whoop_history_query",
@@ -135,13 +164,15 @@ export function registerTools(server: McpServer): void {
       inputSchema: QuerySchema,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async (params) => {
+    async (params: QueryParams) => {
       const history = readHistory();
       if (!history) {
-        return { content: [{ type: "text" as const, text: "No history data. Run whoop_full_history first." }], isError: true };
+        return {
+          content: [{ type: "text" as const, text: "No history data. Run whoop_full_history first." }],
+          isError: true,
+        };
       }
 
-      const type = params.type;
       const endDate = params.end ?? new Date().toISOString().split("T")[0];
       const startDate = params.start ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
@@ -152,14 +183,17 @@ export function registerTools(server: McpServer): void {
         workouts: history.workouts,
       };
 
-      const records = (recordMap[type] ?? []).filter((r) => {
-        const dateStr = ((r as { start?: string; created_at?: string }).start ?? (r as { created_at?: string }).created_at ?? "");
+      const records = (recordMap[params.type] ?? []).filter((r) => {
+        const dateStr = ((r as { start?: string }).start ?? (r as { created_at?: string }).created_at ?? "");
         const date = dateStr.split("T")[0];
         return date >= startDate && date <= endDate;
       }).slice(0, 365);
 
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ type, start: startDate, end: endDate, count: records.length, records }, null, 2) }],
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ type: params.type, start: startDate, end: endDate, count: records.length, records }, null, 2),
+        }],
       };
     }
   );
