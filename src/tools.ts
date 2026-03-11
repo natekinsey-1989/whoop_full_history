@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { readHistory, readStatus } from "./store.js";
 import { runFullPull } from "./pull.js";
 
@@ -9,28 +10,22 @@ export function registerTools(server: McpServer): void {
     "whoop_full_history",
     {
       title: "Pull Full Whoop History",
-      description: `Triggers a one-time bulk pull of ALL historical Whoop data: every cycle, recovery, sleep, and workout record since you first got your Whoop.
-
-Paginates through the entire dataset automatically. For 1-2 years of data this takes 1-3 minutes. The pull runs in the background — call whoop_history_status to check progress, then whoop_history_summary once complete.
-
-Only needs to be run once. After that, use whoop_history_summary or whoop_history_query for analysis.`,
+      description: "Triggers a one-time bulk pull of ALL historical Whoop data: every cycle, recovery, sleep, and workout record since you first got your Whoop. Paginates automatically. Takes 1-3 minutes. Runs in background — call whoop_history_status to check progress, then whoop_history_summary once complete.",
       inputSchema: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async () => {
       const status = readStatus();
-
       if (status.inProgress) {
         return {
-          content: [{ type: "text", text: "Pull already in progress. Use whoop_history_status to check progress." }],
+          content: [{ type: "text" as const, text: "Pull already in progress. Use whoop_history_status to check progress." }],
         };
       }
 
-      // Fire and forget — runs in background
       runFullPull().catch(err => console.error("[tools] Pull error:", err));
 
       return {
-        content: [{ type: "text", text: "Full history pull started. This runs in the background and may take 1-3 minutes depending on how much data you have.\n\nUse whoop_history_status to check progress." }],
+        content: [{ type: "text" as const, text: "Full history pull started. Runs in background — may take 1-3 minutes.\n\nUse whoop_history_status to check progress." }],
       };
     }
   );
@@ -63,8 +58,7 @@ Only needs to be run once. After that, use whoop_history_summary or whoop_histor
       ];
 
       return {
-        content: [{ type: "text", text: lines.join("\n") }],
-        structuredContent: status,
+        content: [{ type: "text" as const, text: lines.join("\n") }],
       };
     }
   );
@@ -74,9 +68,7 @@ Only needs to be run once. After that, use whoop_history_summary or whoop_histor
     "whoop_history_summary",
     {
       title: "Whoop History Summary",
-      description: `Returns a high-level summary of the full historical dataset: date range, record counts, and aggregate stats (avg HRV, avg recovery score, avg sleep, total workouts).
-
-Use this after whoop_full_history completes to confirm data quality and get lifetime averages.`,
+      description: "Returns a high-level summary of the full historical dataset: date range, record counts, and lifetime averages (avg HRV, avg recovery score, avg sleep hours, avg sleep performance). Run after whoop_full_history completes.",
       inputSchema: {},
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
@@ -84,20 +76,19 @@ Use this after whoop_full_history completes to confirm data quality and get life
       const history = readHistory();
       if (!history) {
         return {
-          content: [{ type: "text", text: "No history data found. Run whoop_full_history first." }],
+          content: [{ type: "text" as const, text: "No history data found. Run whoop_full_history first." }],
           isError: true,
         };
       }
 
-      // Date range
       const cycleStarts = history.cycles
         .map((c) => (c as { start?: string }).start)
         .filter(Boolean) as string[];
       cycleStarts.sort();
       const earliest = cycleStarts[0]?.split("T")[0] ?? "unknown";
       const latest = cycleStarts[cycleStarts.length - 1]?.split("T")[0] ?? "unknown";
+      const spanMonths = Math.round(cycleStarts.length / 30);
 
-      // Avg recovery score
       const recoveryScores = history.recoveries
         .map((r) => ((r as { score?: { recovery_score?: number } }).score?.recovery_score))
         .filter((n): n is number => typeof n === "number");
@@ -105,7 +96,6 @@ Use this after whoop_full_history completes to confirm data quality and get life
         ? (recoveryScores.reduce((a, b) => a + b, 0) / recoveryScores.length).toFixed(1)
         : "N/A";
 
-      // Avg HRV
       const hrvValues = history.recoveries
         .map((r) => ((r as { score?: { hrv_rmssd_milli?: number } }).score?.hrv_rmssd_milli))
         .filter((n): n is number => typeof n === "number");
@@ -113,15 +103,13 @@ Use this after whoop_full_history completes to confirm data quality and get life
         ? (hrvValues.reduce((a, b) => a + b, 0) / hrvValues.length).toFixed(1)
         : "N/A";
 
-      // Avg sleep performance
       const sleepScores = history.sleeps
         .map((s) => ((s as { score?: { sleep_performance_percentage?: number } }).score?.sleep_performance_percentage))
         .filter((n): n is number => typeof n === "number");
-      const avgSleep = sleepScores.length
+      const avgSleepPerf = sleepScores.length
         ? (sleepScores.reduce((a, b) => a + b, 0) / sleepScores.length).toFixed(1)
         : "N/A";
 
-      // Avg total sleep hours
       const sleepHours = history.sleeps
         .map((s) => {
           const st = (s as { score?: { stage_summary?: { total_in_bed_time_milli?: number; total_awake_time_milli?: number } } }).score?.stage_summary;
@@ -138,7 +126,7 @@ Use this after whoop_full_history completes to confirm data quality and get life
         "==========================",
         "Pulled At:    " + history.pulledAt.split("T")[0],
         "Date Range:   " + earliest + " to " + latest,
-        "Span:         ~" + Math.round(cycleStarts.length / 30) + " months",
+        "Span:         ~" + spanMonths + " months",
         "",
         "RECORD COUNTS",
         "  Cycles:     " + history.cycles.length,
@@ -147,30 +135,14 @@ Use this after whoop_full_history completes to confirm data quality and get life
         "  Workouts:   " + history.workouts.length,
         "",
         "LIFETIME AVERAGES",
-        "  Recovery Score:   " + avgRecovery + "%",
-        "  HRV (RMSSD):      " + avgHRV + " ms",
-        "  Sleep Performance:" + avgSleep + "%",
-        "  Sleep Duration:   " + avgSleepHrs + " hrs",
+        "  Recovery Score:    " + avgRecovery + "%",
+        "  HRV (RMSSD):       " + avgHRV + " ms",
+        "  Sleep Performance: " + avgSleepPerf + "%",
+        "  Sleep Duration:    " + avgSleepHrs + " hrs",
       ];
 
       return {
-        content: [{ type: "text", text: lines.join("\n") }],
-        structuredContent: {
-          pulledAt: history.pulledAt,
-          dateRange: { earliest, latest },
-          counts: {
-            cycles: history.cycles.length,
-            recoveries: history.recoveries.length,
-            sleeps: history.sleeps.length,
-            workouts: history.workouts.length,
-          },
-          lifetimeAverages: {
-            recovery_score: avgRecovery,
-            hrv_ms: avgHRV,
-            sleep_performance_pct: avgSleep,
-            sleep_hrs: avgSleepHrs,
-          },
-        },
+        content: [{ type: "text" as const, text: lines.join("\n") }],
       };
     }
   );
@@ -180,40 +152,24 @@ Use this after whoop_full_history completes to confirm data quality and get life
     "whoop_history_query",
     {
       title: "Query Whoop History",
-      description: `Returns raw historical records filtered by date range and data type. Use for deep analysis, trend identification, or feeding data into calculations.
-
-Args:
-  - type: "recovery" | "sleep" | "cycles" | "workouts"
-  - start: YYYY-MM-DD (optional, defaults to 90 days ago)
-  - end: YYYY-MM-DD (optional, defaults to today)
-
-Returns up to 365 records for the specified range and type.`,
+      description: "Returns raw historical records filtered by date range and data type. Use for deep analysis and trend work. type: recovery | sleep | cycles | workouts. start/end: YYYY-MM-DD (defaults to last 90 days). Returns up to 365 records.",
       inputSchema: {
-        type: {
-          enum: ["recovery", "sleep", "cycles", "workouts"],
-          description: "Data type to query",
-        } as unknown as import("zod").ZodString,
-        start: {
-          optional: true,
-          description: "Start date YYYY-MM-DD (default: 90 days ago)",
-        } as unknown as import("zod").ZodString,
-        end: {
-          optional: true,
-          description: "End date YYYY-MM-DD (default: today)",
-        } as unknown as import("zod").ZodString,
+        type: z.enum(["recovery", "sleep", "cycles", "workouts"]).describe("Data type to query"),
+        start: z.string().optional().describe("Start date YYYY-MM-DD (default: 90 days ago)"),
+        end: z.string().optional().describe("End date YYYY-MM-DD (default: today)"),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async (params: Record<string, string>) => {
+    async (params) => {
       const history = readHistory();
       if (!history) {
         return {
-          content: [{ type: "text", text: "No history data. Run whoop_full_history first." }],
+          content: [{ type: "text" as const, text: "No history data. Run whoop_full_history first." }],
           isError: true,
         };
       }
 
-      const type = params.type as "recovery" | "sleep" | "cycles" | "workouts";
+      const type = params.type;
       const endDate = params.end ?? new Date().toISOString().split("T")[0];
       const startDate = params.start ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
@@ -225,14 +181,17 @@ Returns up to 365 records for the specified range and type.`,
       };
 
       const records = (recordMap[type] ?? []).filter((r) => {
-        const start = ((r as { start?: string; created_at?: string }).start ?? (r as { created_at?: string }).created_at ?? "");
-        const date = start.split("T")[0];
+        const dateStr = ((r as { start?: string; created_at?: string }).start
+          ?? (r as { created_at?: string }).created_at
+          ?? "");
+        const date = dateStr.split("T")[0];
         return date >= startDate && date <= endDate;
       }).slice(0, 365);
 
+      const result = { type, start: startDate, end: endDate, count: records.length, records };
+
       return {
-        content: [{ type: "text", text: JSON.stringify({ type, start: startDate, end: endDate, count: records.length, records }, null, 2) }],
-        structuredContent: { type, start: startDate, end: endDate, count: records.length, records },
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
     }
   );
