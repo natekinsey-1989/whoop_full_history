@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
 import { readHistory, readStatus } from "./store.js";
 import { runFullPull } from "./pull.js";
+
+const VALID_TYPES = ["recovery", "sleep", "cycles", "workouts"] as const;
+type QueryType = typeof VALID_TYPES[number];
 
 export function registerTools(server: McpServer): void {
 
@@ -21,7 +23,9 @@ export function registerTools(server: McpServer): void {
           content: [{ type: "text" as const, text: "Pull already in progress. Use whoop_history_status to check progress." }],
         };
       }
+
       runFullPull().catch((err: unknown) => console.error("[tools] Pull error:", err));
+
       return {
         content: [{ type: "text" as const, text: "Full history pull started. Runs in background — may take 1-3 minutes.\n\nUse whoop_history_status to check progress." }],
       };
@@ -39,6 +43,7 @@ export function registerTools(server: McpServer): void {
     },
     async () => {
       const status = readStatus();
+
       const lines = [
         "WHOOP HISTORY PULL STATUS",
         "=========================",
@@ -53,7 +58,10 @@ export function registerTools(server: McpServer): void {
         "  Sleeps:     " + status.counts.sleeps,
         "  Workouts:   " + status.counts.workouts,
       ];
-      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+      };
     }
   );
 
@@ -83,20 +91,26 @@ export function registerTools(server: McpServer): void {
       const latest = cycleStarts[cycleStarts.length - 1]?.split("T")[0] ?? "unknown";
       const spanMonths = Math.round(cycleStarts.length / 30);
 
-      const avg = (nums: number[]) =>
-        nums.length ? (nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(1) : "N/A";
-
       const recoveryScores = history.recoveries
-        .map((r) => (r as { score?: { recovery_score?: number } }).score?.recovery_score)
+        .map((r) => ((r as { score?: { recovery_score?: number } }).score?.recovery_score))
         .filter((n): n is number => typeof n === "number");
+      const avgRecovery = recoveryScores.length
+        ? (recoveryScores.reduce((a, b) => a + b, 0) / recoveryScores.length).toFixed(1)
+        : "N/A";
 
       const hrvValues = history.recoveries
-        .map((r) => (r as { score?: { hrv_rmssd_milli?: number } }).score?.hrv_rmssd_milli)
+        .map((r) => ((r as { score?: { hrv_rmssd_milli?: number } }).score?.hrv_rmssd_milli))
         .filter((n): n is number => typeof n === "number");
+      const avgHRV = hrvValues.length
+        ? (hrvValues.reduce((a, b) => a + b, 0) / hrvValues.length).toFixed(1)
+        : "N/A";
 
-      const sleepPerfScores = history.sleeps
-        .map((s) => (s as { score?: { sleep_performance_percentage?: number } }).score?.sleep_performance_percentage)
+      const sleepScores = history.sleeps
+        .map((s) => ((s as { score?: { sleep_performance_percentage?: number } }).score?.sleep_performance_percentage))
         .filter((n): n is number => typeof n === "number");
+      const avgSleepPerf = sleepScores.length
+        ? (sleepScores.reduce((a, b) => a + b, 0) / sleepScores.length).toFixed(1)
+        : "N/A";
 
       const sleepHours = history.sleeps
         .map((s) => {
@@ -105,6 +119,9 @@ export function registerTools(server: McpServer): void {
           return (st.total_in_bed_time_milli - (st.total_awake_time_milli ?? 0)) / 3600000;
         })
         .filter((n): n is number => n !== null);
+      const avgSleepHrs = sleepHours.length
+        ? (sleepHours.reduce((a, b) => a + b, 0) / sleepHours.length).toFixed(1)
+        : "N/A";
 
       const lines = [
         "WHOOP FULL HISTORY SUMMARY",
@@ -120,31 +137,30 @@ export function registerTools(server: McpServer): void {
         "  Workouts:   " + history.workouts.length,
         "",
         "LIFETIME AVERAGES",
-        "  Recovery Score:    " + avg(recoveryScores) + "%",
-        "  HRV (RMSSD):       " + avg(hrvValues) + " ms",
-        "  Sleep Performance: " + avg(sleepPerfScores) + "%",
-        "  Sleep Duration:    " + avg(sleepHours) + " hrs",
+        "  Recovery Score:    " + avgRecovery + "%",
+        "  HRV (RMSSD):       " + avgHRV + " ms",
+        "  Sleep Performance: " + avgSleepPerf + "%",
+        "  Sleep Duration:    " + avgSleepHrs + " hrs",
       ];
 
-      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+      };
     }
   );
 
   // ─── Raw Query ────────────────────────────────────────────────────────────
-  // inputSchema uses raw Zod field shape (not z.object()) per MCP SDK requirements
+  // inputSchema uses {} to avoid MCP SDK Zod type recursion bug.
+  // Parameters are validated manually at runtime instead.
   server.registerTool(
     "whoop_history_query",
     {
       title: "Query Whoop History",
-      description: "Returns raw historical records filtered by date range and data type. type: recovery | sleep | cycles | workouts. start/end: YYYY-MM-DD (defaults to last 90 days). Returns up to 365 records.",
-      inputSchema: {
-        type: z.enum(["recovery", "sleep", "cycles", "workouts"]).describe("Data type to query"),
-        start: z.string().optional().describe("Start date YYYY-MM-DD (default: 90 days ago)"),
-        end: z.string().optional().describe("End date YYYY-MM-DD (default: today)"),
-      },
+      description: "Returns raw historical records filtered by date range and data type. Parameters: type (recovery | sleep | cycles | workouts), start (YYYY-MM-DD, optional, default 90 days ago), end (YYYY-MM-DD, optional, default today). Returns up to 365 records.",
+      inputSchema: {},
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async (params) => {
+    async (params: Record<string, unknown>) => {
       const history = readHistory();
       if (!history) {
         return {
@@ -153,26 +169,32 @@ export function registerTools(server: McpServer): void {
         };
       }
 
-      const dataType = params.type as string;
-      const endDate = (params.end as string | undefined) ?? new Date().toISOString().split("T")[0];
-      const startDate = (params.start as string | undefined) ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-
-      const validTypes = ["recovery", "sleep", "cycles", "workouts"];
-      if (!validTypes.includes(dataType)) {
+      // Runtime validation
+      const rawType = params["type"];
+      if (typeof rawType !== "string" || !VALID_TYPES.includes(rawType as QueryType)) {
         return {
           content: [{ type: "text" as const, text: "Invalid type. Must be one of: recovery, sleep, cycles, workouts" }],
           isError: true,
         };
       }
+      const type = rawType as QueryType;
 
-      const recordMap: Record<string, Record<string, unknown>[]> = {
+      const endDate = typeof params["end"] === "string"
+        ? params["end"]
+        : new Date().toISOString().split("T")[0];
+
+      const startDate = typeof params["start"] === "string"
+        ? params["start"]
+        : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+      const recordMap: Record<QueryType, Record<string, unknown>[]> = {
         recovery: history.recoveries,
         sleep: history.sleeps,
         cycles: history.cycles,
         workouts: history.workouts,
       };
 
-      const records = (recordMap[dataType] ?? []).filter((r) => {
+      const records = recordMap[type].filter((r) => {
         const dateStr = ((r as { start?: string }).start ?? (r as { created_at?: string }).created_at ?? "");
         const date = dateStr.split("T")[0];
         return date >= startDate && date <= endDate;
@@ -181,7 +203,7 @@ export function registerTools(server: McpServer): void {
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ type: dataType, start: startDate, end: endDate, count: records.length, records }, null, 2),
+          text: JSON.stringify({ type, start: startDate, end: endDate, count: records.length, records }, null, 2),
         }],
       };
     }
