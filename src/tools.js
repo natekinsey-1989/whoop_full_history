@@ -1,9 +1,11 @@
 // @ts-nocheck
-// Plain JavaScript — bypasses MCP SDK TS2589 Zod recursion bug entirely.
-// tsc copies this to dist/ via allowJs:true, checkJs:false in tsconfig.
+// Plain JS to avoid MCP SDK TS2589 Zod bug.
+// whoop_history_query is registered via low-level server.server.setRequestHandler
+// to bypass registerTool's Zod schema validation entirely.
 
 import { readHistory, readStatus } from "./store.js";
 import { runFullPull } from "./pull.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const VALID_TYPES = ["recovery", "sleep", "cycles", "workouts"];
 
@@ -114,12 +116,32 @@ export function registerTools(server) {
   );
 
   // ─── Raw Query ────────────────────────────────────────────────────────────
-  // JSON Schema inputSchema — no Zod, no TypeScript, no TS2589 possible.
-  // Claude will correctly see type/start/end as available parameters.
-  server.registerTool(
-    "whoop_history_query",
-    {
-      title: "Query Whoop History",
+  // Uses low-level server.server handlers to completely bypass registerTool
+  // and its Zod schema validation. We intercept ListTools and CallTool
+  // requests at the protocol level, handle whoop_history_query ourselves,
+  // and forward everything else to the McpServer's built-in handler.
+
+  const innerServer = server.server;
+
+  // Store reference to original handlers so we can chain them
+  const originalListTools = innerServer._requestHandlers?.get("tools/list");
+  const originalCallTool = innerServer._requestHandlers?.get("tools/call");
+
+  innerServer.setRequestHandler(ListToolsRequestSchema, async (request) => {
+    // Get tools already registered via registerTool
+    let existingTools = [];
+    if (originalListTools) {
+      try {
+        const result = await originalListTools(request, {});
+        existingTools = result?.tools ?? [];
+      } catch (e) {
+        console.error("[tools] listTools chain error:", e);
+      }
+    }
+
+    // Append whoop_history_query with full JSON Schema
+    existingTools.push({
+      name: "whoop_history_query",
       description: "Returns raw historical records filtered by date range and data type. type must be one of: recovery, sleep, cycles, workouts. start and end are optional dates in YYYY-MM-DD format (default: last 90 days). Returns up to 365 records.",
       inputSchema: {
         type: "object",
@@ -140,24 +162,30 @@ export function registerTools(server) {
         },
         required: ["type"],
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-    },
-    async (params) => {
+    });
+
+    return { tools: existingTools };
+  });
+
+  innerServer.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const { name, arguments: args } = request.params;
+
+    if (name === "whoop_history_query") {
       const history = readHistory();
       if (!history) {
         return { content: [{ type: "text", text: "No history data. Run whoop_full_history first." }], isError: true };
       }
 
-      const rawType = params.type;
-      if (!VALID_TYPES.includes(rawType)) {
+      const rawType = args?.type;
+      if (!rawType || !VALID_TYPES.includes(rawType)) {
         return {
           content: [{ type: "text", text: "Invalid type '" + rawType + "'. Must be one of: recovery, sleep, cycles, workouts" }],
           isError: true,
         };
       }
 
-      const endDate = params.end ?? new Date().toISOString().split("T")[0];
-      const startDate = params.start ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      const endDate = args?.end ?? new Date().toISOString().split("T")[0];
+      const startDate = args?.start ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
       const recordMap = {
         recovery: history.recoveries,
@@ -179,5 +207,12 @@ export function registerTools(server) {
         }],
       };
     }
-  );
+
+    // Forward all other tool calls to the original handler
+    if (originalCallTool) {
+      return originalCallTool(request, extra);
+    }
+
+    return { content: [{ type: "text", text: "Tool not found: " + name }], isError: true };
+  });
 }
