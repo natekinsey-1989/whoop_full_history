@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import { readHistory, readStatus } from "./store.js";
 import { runFullPull } from "./pull.js";
 
@@ -122,37 +123,37 @@ export function registerTools(server: McpServer): void {
   );
 
   // ─── Raw Query ────────────────────────────────────────────────────────────
-  // inputSchema: {} — SDK 1.0.4 passes args through as-is without schema validation.
-  // Claude passes type/start/end directly; validated manually below.
+  // z.string() compiles fine — no TS2589 (only z.enum() triggers it).
+  // Enum constraint is enforced at runtime via VALID_TYPES check below.
   server.registerTool(
     "whoop_history_query",
     {
       title: "Query Whoop History",
-      description: "Returns raw historical records filtered by date range and data type. Pass 'type' as one of: recovery, sleep, cycles, workouts. Optionally pass 'start' and 'end' as YYYY-MM-DD dates (default: last 90 days). Returns up to 365 records.",
-      inputSchema: {},
+      description: "Returns raw historical records filtered by date range and data type. type must be one of: recovery, sleep, cycles, workouts. start and end are optional dates in YYYY-MM-DD format (default: last 90 days). Returns up to 365 records.",
+      inputSchema: {
+        type: z.string().describe("Data type: recovery | sleep | cycles | workouts"),
+        start: z.string().optional().describe("Start date YYYY-MM-DD (default: 90 days ago)"),
+        end: z.string().optional().describe("End date YYYY-MM-DD (default: today)"),
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async (params: Record<string, unknown>) => {
+    async (params) => {
       const history = readHistory();
       if (!history) {
         return { content: [{ type: "text" as const, text: "No history data. Run whoop_full_history first." }], isError: true };
       }
 
-      const rawType = params["type"];
-      if (typeof rawType !== "string" || !VALID_TYPES.includes(rawType as QueryType)) {
+      const rawType = params.type;
+      if (!VALID_TYPES.includes(rawType as QueryType)) {
         return {
-          content: [{ type: "text" as const, text: "Invalid or missing 'type'. Must be one of: recovery, sleep, cycles, workouts" }],
+          content: [{ type: "text" as const, text: "Invalid type '" + rawType + "'. Must be one of: recovery, sleep, cycles, workouts" }],
           isError: true,
         };
       }
       const type = rawType as QueryType;
 
-      const endDate = typeof params["end"] === "string"
-        ? params["end"]
-        : new Date().toISOString().split("T")[0];
-      const startDate = typeof params["start"] === "string"
-        ? params["start"]
-        : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+      const endDate = params.end ?? new Date().toISOString().split("T")[0];
+      const startDate = params.start ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
       const recordMap: Record<QueryType, Record<string, unknown>[]> = {
         recovery: history.recoveries,
