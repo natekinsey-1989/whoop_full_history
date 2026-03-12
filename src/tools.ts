@@ -5,6 +5,27 @@ import { runFullPull } from "./pull.js";
 const VALID_TYPES = ["recovery", "sleep", "cycles", "workouts"] as const;
 type QueryType = typeof VALID_TYPES[number];
 
+// Raw JSON Schema for the query tool — avoids all Zod/SDK version issues
+const QUERY_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    type: {
+      type: "string",
+      enum: ["recovery", "sleep", "cycles", "workouts"],
+      description: "Data type to query",
+    },
+    start: {
+      type: "string",
+      description: "Start date YYYY-MM-DD (default: 90 days ago)",
+    },
+    end: {
+      type: "string",
+      description: "End date YYYY-MM-DD (default: today)",
+    },
+  },
+  required: ["type"],
+};
+
 export function registerTools(server: McpServer): void {
 
   // ─── Full History Pull ────────────────────────────────────────────────────
@@ -70,13 +91,16 @@ export function registerTools(server: McpServer): void {
         return { content: [{ type: "text" as const, text: "No history data found. Run whoop_full_history first." }], isError: true };
       }
 
-      const cycleStarts = history.cycles.map((c) => (c as { start?: string }).start).filter(Boolean) as string[];
+      const cycleStarts = history.cycles
+        .map((c) => (c as { start?: string }).start)
+        .filter(Boolean) as string[];
       cycleStarts.sort();
       const earliest = cycleStarts[0]?.split("T")[0] ?? "unknown";
       const latest = cycleStarts[cycleStarts.length - 1]?.split("T")[0] ?? "unknown";
       const spanMonths = Math.round(cycleStarts.length / 30);
 
-      const avg = (arr: number[]) => arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : "N/A";
+      const avg = (vals: number[]) =>
+        vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1) : "N/A";
 
       const recoveryScores = history.recoveries
         .map((r) => ((r as { score?: { recovery_score?: number } }).score?.recovery_score))
@@ -123,21 +147,12 @@ export function registerTools(server: McpServer): void {
   );
 
   // ─── Raw Query ────────────────────────────────────────────────────────────
-  // NOTE: Using plain object with 'as any' for inputSchema to work around
-  // MCP SDK TS2589 infinite type recursion bug with Zod enums.
-  // Parameters are declared so Claude knows they exist, validated at runtime.
-  const queryInputSchema = {
-    type: { type: "string", enum: ["recovery", "sleep", "cycles", "workouts"], description: "Data type to query: recovery, sleep, cycles, or workouts" },
-    start: { type: "string", description: "Start date in YYYY-MM-DD format (optional, default: 90 days ago)" },
-    end: { type: "string", description: "End date in YYYY-MM-DD format (optional, default: today)" },
-  };
-
   server.registerTool(
     "whoop_history_query",
     {
       title: "Query Whoop History",
-      description: "Returns raw historical records filtered by date range and data type. Required: type (recovery | sleep | cycles | workouts). Optional: start and end as YYYY-MM-DD (default: last 90 days). Returns up to 365 records.",
-      inputSchema: queryInputSchema as unknown as Record<string, never>,
+      description: "Returns raw historical records filtered by date range and data type. Required: type (recovery | sleep | cycles | workouts). Optional: start and end dates in YYYY-MM-DD format (default: last 90 days). Returns up to 365 records.",
+      inputSchema: QUERY_SCHEMA,
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async (params: Record<string, unknown>) => {
@@ -149,7 +164,7 @@ export function registerTools(server: McpServer): void {
       const rawType = params["type"];
       if (typeof rawType !== "string" || !VALID_TYPES.includes(rawType as QueryType)) {
         return {
-          content: [{ type: "text" as const, text: "Invalid or missing type. Must be one of: recovery, sleep, cycles, workouts" }],
+          content: [{ type: "text" as const, text: "Invalid type '" + String(rawType) + "'. Must be one of: recovery, sleep, cycles, workouts" }],
           isError: true,
         };
       }
@@ -158,7 +173,6 @@ export function registerTools(server: McpServer): void {
       const endDate = typeof params["end"] === "string"
         ? params["end"]
         : new Date().toISOString().split("T")[0];
-
       const startDate = typeof params["start"] === "string"
         ? params["start"]
         : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
