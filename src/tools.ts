@@ -5,27 +5,6 @@ import { runFullPull } from "./pull.js";
 const VALID_TYPES = ["recovery", "sleep", "cycles", "workouts"] as const;
 type QueryType = typeof VALID_TYPES[number];
 
-// Raw JSON Schema for the query tool — avoids all Zod/SDK version issues
-const QUERY_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    type: {
-      type: "string",
-      enum: ["recovery", "sleep", "cycles", "workouts"],
-      description: "Data type to query",
-    },
-    start: {
-      type: "string",
-      description: "Start date YYYY-MM-DD (default: 90 days ago)",
-    },
-    end: {
-      type: "string",
-      description: "End date YYYY-MM-DD (default: today)",
-    },
-  },
-  required: ["type"],
-};
-
 export function registerTools(server: McpServer): void {
 
   // ─── Full History Pull ────────────────────────────────────────────────────
@@ -105,15 +84,12 @@ export function registerTools(server: McpServer): void {
       const recoveryScores = history.recoveries
         .map((r) => ((r as { score?: { recovery_score?: number } }).score?.recovery_score))
         .filter((n): n is number => typeof n === "number");
-
       const hrvValues = history.recoveries
         .map((r) => ((r as { score?: { hrv_rmssd_milli?: number } }).score?.hrv_rmssd_milli))
         .filter((n): n is number => typeof n === "number");
-
       const sleepScores = history.sleeps
         .map((s) => ((s as { score?: { sleep_performance_percentage?: number } }).score?.sleep_performance_percentage))
         .filter((n): n is number => typeof n === "number");
-
       const sleepHours = history.sleeps
         .map((s) => {
           const st = (s as { score?: { stage_summary?: { total_in_bed_time_milli?: number; total_awake_time_milli?: number } } }).score?.stage_summary;
@@ -141,18 +117,19 @@ export function registerTools(server: McpServer): void {
         "  Sleep Performance: " + avg(sleepScores) + "%",
         "  Sleep Duration:    " + avg(sleepHours) + " hrs",
       ];
-
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     }
   );
 
   // ─── Raw Query ────────────────────────────────────────────────────────────
+  // inputSchema: {} — SDK 1.0.4 passes args through as-is without schema validation.
+  // Claude passes type/start/end directly; validated manually below.
   server.registerTool(
     "whoop_history_query",
     {
       title: "Query Whoop History",
-      description: "Returns raw historical records filtered by date range and data type. Required: type (recovery | sleep | cycles | workouts). Optional: start and end dates in YYYY-MM-DD format (default: last 90 days). Returns up to 365 records.",
-      inputSchema: QUERY_SCHEMA,
+      description: "Returns raw historical records filtered by date range and data type. Pass 'type' as one of: recovery, sleep, cycles, workouts. Optionally pass 'start' and 'end' as YYYY-MM-DD dates (default: last 90 days). Returns up to 365 records.",
+      inputSchema: {},
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async (params: Record<string, unknown>) => {
@@ -164,7 +141,7 @@ export function registerTools(server: McpServer): void {
       const rawType = params["type"];
       if (typeof rawType !== "string" || !VALID_TYPES.includes(rawType as QueryType)) {
         return {
-          content: [{ type: "text" as const, text: "Invalid type '" + String(rawType) + "'. Must be one of: recovery, sleep, cycles, workouts" }],
+          content: [{ type: "text" as const, text: "Invalid or missing 'type'. Must be one of: recovery, sleep, cycles, workouts" }],
           isError: true,
         };
       }
