@@ -1,8 +1,6 @@
-// tools.js — plain JavaScript, NOT TypeScript.
-// This file exists because the MCP SDK has a confirmed TS2589 bug with any Zod
-// schema inside registerTool. By writing this in .js and excluding it from tsc,
-// we bypass the TypeScript compiler entirely for tool registration.
-// index.ts imports this via: import { registerTools } from "./tools.js"
+// @ts-nocheck
+// Plain JavaScript — bypasses MCP SDK TS2589 Zod recursion bug entirely.
+// tsc copies this to dist/ via allowJs:true, checkJs:false in tsconfig.
 
 import { readHistory, readStatus } from "./store.js";
 import { runFullPull } from "./pull.js";
@@ -116,18 +114,29 @@ export function registerTools(server) {
   );
 
   // ─── Raw Query ────────────────────────────────────────────────────────────
-  // inputSchema uses raw JSON Schema object — no Zod, no TypeScript type checking.
+  // JSON Schema inputSchema — no Zod, no TypeScript, no TS2589 possible.
+  // Claude will correctly see type/start/end as available parameters.
   server.registerTool(
     "whoop_history_query",
     {
       title: "Query Whoop History",
-      description: "Returns raw historical records filtered by date range and data type. Pass 'type' as one of: recovery, sleep, cycles, workouts. Optionally pass 'start' and 'end' as YYYY-MM-DD dates (default: last 90 days). Returns up to 365 records.",
+      description: "Returns raw historical records filtered by date range and data type. type must be one of: recovery, sleep, cycles, workouts. start and end are optional dates in YYYY-MM-DD format (default: last 90 days). Returns up to 365 records.",
       inputSchema: {
         type: "object",
         properties: {
-          type: { type: "string", enum: ["recovery", "sleep", "cycles", "workouts"], description: "Data type to query" },
-          start: { type: "string", description: "Start date YYYY-MM-DD (default: 90 days ago)" },
-          end: { type: "string", description: "End date YYYY-MM-DD (default: today)" },
+          type: {
+            type: "string",
+            enum: ["recovery", "sleep", "cycles", "workouts"],
+            description: "Data type to query",
+          },
+          start: {
+            type: "string",
+            description: "Start date YYYY-MM-DD (default: 90 days ago)",
+          },
+          end: {
+            type: "string",
+            description: "End date YYYY-MM-DD (default: today)",
+          },
         },
         required: ["type"],
       },
