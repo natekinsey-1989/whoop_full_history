@@ -1,7 +1,7 @@
 {
   "name": "whoop-history-server",
-  "version": "1.0.3",
-  "description": "Whoop full historical data MCP server",
+  "version": "1.1.0",
+  "description": "Whoop full historical data MCP server with date-ranged sync and daily cron",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -10,11 +10,13 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.6.1",
     "express": "^4.18.2",
+    "node-cron": "^3.0.3",
     "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.5",
+    "@types/node-cron": "^3.0.11",
     "typescript": "^5.3.3"
   }
 }
