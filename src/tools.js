@@ -291,7 +291,7 @@ export function registerTools(server) {
 
       const records = recordMap[rawType]
         .filter(r => {
-          const d = ((r.start ?? r.created_at ?? "") as string).split("T")[0];
+          const d = (r.start ?? r.created_at ?? "").split("T")[0];
           return d >= startDate && d <= endDate;
         })
         .slice(0, 365);
