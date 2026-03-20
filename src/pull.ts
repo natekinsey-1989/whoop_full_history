@@ -151,7 +151,7 @@ export async function runFullPull(): Promise<void> {
 // - Merges new records into existing cache by id/cycle_id deduplication
 // - Updates coverage metadata after merge
 
-export async function runDateRangePull(start: string, end: string): Promise<void> {
+export async function runDateRangePull(start: string, end: string, force = false): Promise<void> {
   const existing = readStatus();
   if (existing.inProgress) {
     console.log("[pull] Already in progress, skipping");
@@ -163,7 +163,7 @@ export async function runDateRangePull(start: string, end: string): Promise<void
     startedAt:      new Date().toISOString(),
     completedAt:    null,
     error:          null,
-    mode:           "incremental",
+    mode:           force ? "force" : "incremental",
     requestedStart: start,
     requestedEnd:   end,
     counts:  { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
@@ -186,7 +186,7 @@ export async function runDateRangePull(start: string, end: string): Promise<void
 
   try {
     // ── Cycles ──
-    const cycleRange = rangeToFetch(cov?.cycles, start, end);
+    const cycleRange = force ? { start, end } : rangeToFetch(cov?.cycles, start, end);
     if (cycleRange) {
       console.log(`[pull:incremental] Fetching cycles ${cycleRange.start} → ${cycleRange.end}`);
       const incoming = await fetchAllPages<Record<string, unknown>>("/cycle", {
@@ -203,7 +203,7 @@ export async function runDateRangePull(start: string, end: string): Promise<void
     status.counts.cycles = history.cycles.length;
 
     // ── Recoveries ──
-    const recoveryRange = rangeToFetch(cov?.recoveries, start, end);
+    const recoveryRange = force ? { start, end } : rangeToFetch(cov?.recoveries, start, end);
     if (recoveryRange) {
       console.log(`[pull:incremental] Fetching recoveries ${recoveryRange.start} → ${recoveryRange.end}`);
       const incoming = await fetchAllPages<Record<string, unknown>>("/recovery", {
@@ -220,7 +220,7 @@ export async function runDateRangePull(start: string, end: string): Promise<void
     status.counts.recoveries = history.recoveries.length;
 
     // ── Sleeps ──
-    const sleepRange = rangeToFetch(cov?.sleeps, start, end);
+    const sleepRange = force ? { start, end } : rangeToFetch(cov?.sleeps, start, end);
     if (sleepRange) {
       console.log(`[pull:incremental] Fetching sleeps ${sleepRange.start} → ${sleepRange.end}`);
       const incoming = await fetchAllPages<Record<string, unknown>>("/activity/sleep", {
@@ -237,7 +237,7 @@ export async function runDateRangePull(start: string, end: string): Promise<void
     status.counts.sleeps = history.sleeps.length;
 
     // ── Workouts ──
-    const workoutRange = rangeToFetch(cov?.workouts, start, end);
+    const workoutRange = force ? { start, end } : rangeToFetch(cov?.workouts, start, end);
     if (workoutRange) {
       console.log(`[pull:incremental] Fetching workouts ${workoutRange.start} → ${workoutRange.end}`);
       const incoming = await fetchAllPages<Record<string, unknown>>("/activity/workout", {
