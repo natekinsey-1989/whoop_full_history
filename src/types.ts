@@ -30,7 +30,7 @@ export interface PullStatus {
   startedAt:    string | null;
   completedAt:  string | null;
   error:        string | null;
-  mode:         "full" | "incremental"; // NEW — surfaced in status tool
+  mode:         "full" | "incremental" | "force"; // — surfaced in status tool
   requestedStart: string | null;        // NEW — what range was requested
   requestedEnd:   string | null;
   counts: {
