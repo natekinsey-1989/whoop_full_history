@@ -33,16 +33,20 @@ const TOOLS = [
       "WITHOUT start/end: full re-pull of all history (1-3 min). Use once for initial baseline or forced refresh.\n\n" +
       "WITH start and/or end (YYYY-MM-DD): incremental pull — only fetches data outside the cached range, " +
       "merges new records into existing cache, and updates coverage metadata. Fast for daily syncs.\n\n" +
+      "WITH force=true: bypasses cache check and re-fetches the full requested range from the Whoop API. " +
+      "Use this after editing activity tags in the Whoop app to overwrite stale cached records.\n\n" +
       "Examples:\n" +
-      "  whoop_full_history()                                       — full re-pull\n" +
-      "  whoop_full_history(start='2026-03-18')                     — sync from Mar 18 to today\n" +
-      "  whoop_full_history(start='2026-03-18', end='2026-03-19')   — specific range\n\n" +
+      "  whoop_full_history()                                             — full re-pull\n" +
+      "  whoop_full_history(start='2026-03-18')                           — sync from Mar 18 to today\n" +
+      "  whoop_full_history(start='2026-03-18', end='2026-03-19')         — specific range\n" +
+      "  whoop_full_history(start='2026-03-18', end='2026-03-19', force=true) — force re-fetch (tag updates)\n\n" +
       "Runs in background. Use whoop_history_status to check progress.",
     inputSchema: {
       type: "object",
       properties: {
         start: { type: "string", description: "Start date YYYY-MM-DD. Omit for full re-pull." },
         end:   { type: "string", description: "End date YYYY-MM-DD (default: today)." },
+        force: { type: "boolean", description: "Bypass cache check and re-fetch from Whoop API. Use after editing activity tags in the app." },
       },
     },
   },
@@ -90,6 +94,7 @@ async function handleFullHistory(args) {
   }
 
   const start = args && args.start;
+  const force = !!(args && args.force);
   const end   = (args && args.end) || today();
 
   if (start && !isValidDate(start)) {
@@ -103,7 +108,7 @@ async function handleFullHistory(args) {
   }
 
   if (start) {
-    runDateRangePull(start, end).catch(function(err) { console.error("[tools] Date-range pull error:", err); });
+    runDateRangePull(start, end, !!force).catch(function(err) { console.error("[tools] Date-range pull error:", err); });
     return {
       content: [{
         type: "text",
