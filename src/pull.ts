@@ -58,6 +58,26 @@ function mergeRecords(
 }
 
 // ─── Full pull (initial baseline or forced re-pull) ───────────────────────────
+//
+// IMPORTANT: We explicitly bound every fetch with a wide-open date range
+// (FULL_PULL_START → today) rather than omitting start/end entirely.
+//
+// Whoop's docs state that omitting `start` returns "no minimum time filter" —
+// i.e. the complete unbounded history. In practice, an unbounded nextToken
+// walk on /recovery was observed to silently stop (next_token absent, no
+// error) far short of the user's actual data — recovery data confirmed to
+// exist in the Whoop app for dates the unfiltered pull never reached.
+// Explicit start/end bounds route through the same query path validated by
+// runDateRangePull, which does not exhibit this truncation.
+//
+// FULL_PULL_START predates any possible Whoop device usage — adjust down if
+// you have a known earliest-possible date, but err on the early side.
+
+const FULL_PULL_START = "2010-01-01";
+
+function todayIso(): string {
+  return new Date().toISOString().split("T")[0];
+}
 
 export async function runFullPull(): Promise<void> {
   const existing = readStatus();
@@ -66,14 +86,16 @@ export async function runFullPull(): Promise<void> {
     return;
   }
 
+  const end = todayIso();
+
   const status: PullStatus = {
     inProgress:     true,
     startedAt:      new Date().toISOString(),
     completedAt:    null,
     error:          null,
     mode:           "full",
-    requestedStart: null,
-    requestedEnd:   null,
+    requestedStart: FULL_PULL_START,
+    requestedEnd:   end,
     counts:  { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
     fetched: { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
   };
@@ -91,29 +113,33 @@ export async function runFullPull(): Promise<void> {
     profile = await fetchProfile().catch(() => null);
     body    = await fetchBody().catch(() => null);
 
-    console.log("[pull:full] Fetching cycles...");
+    console.log(`[pull:full] Fetching cycles ${FULL_PULL_START} → ${end}...`);
     cycles = await fetchAllPages<Record<string, unknown>>("/cycle", {
+      start: FULL_PULL_START, end,
       onPage: n => { status.counts.cycles = n; writeStatus(status); },
     });
     status.fetched.cycles = cycles.length;
     writeHistory({ pulledAt: new Date().toISOString(), profile, body, cycles, recoveries, sleeps, workouts });
 
-    console.log("[pull:full] Fetching recoveries...");
+    console.log(`[pull:full] Fetching recoveries ${FULL_PULL_START} → ${end}...`);
     recoveries = await fetchAllPages<Record<string, unknown>>("/recovery", {
+      start: FULL_PULL_START, end,
       onPage: n => { status.counts.recoveries = n; writeStatus(status); },
     });
     status.fetched.recoveries = recoveries.length;
     writeHistory({ pulledAt: new Date().toISOString(), profile, body, cycles, recoveries, sleeps, workouts });
 
-    console.log("[pull:full] Fetching sleeps...");
+    console.log(`[pull:full] Fetching sleeps ${FULL_PULL_START} → ${end}...`);
     sleeps = await fetchAllPages<Record<string, unknown>>("/activity/sleep", {
+      start: FULL_PULL_START, end,
       onPage: n => { status.counts.sleeps = n; writeStatus(status); },
     });
     status.fetched.sleeps = sleeps.length;
     writeHistory({ pulledAt: new Date().toISOString(), profile, body, cycles, recoveries, sleeps, workouts });
 
-    console.log("[pull:full] Fetching workouts...");
+    console.log(`[pull:full] Fetching workouts ${FULL_PULL_START} → ${end}...`);
     workouts = await fetchAllPages<Record<string, unknown>>("/activity/workout", {
+      start: FULL_PULL_START, end,
       onPage: n => { status.counts.workouts = n; writeStatus(status); },
     });
     status.fetched.workouts = workouts.length;
