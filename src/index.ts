@@ -37,12 +37,34 @@ registerAuthRoutes(app);
 
 // Force-override the Accept header so the MCP SDK's strict media-type check
 // always passes regardless of what the connecting client actually sent.
-// DIAGNOSTIC: X-Debug-Accept-Override response header lets us confirm via
-// curl whether this middleware executes. Remove once the 406/connector
-// registration issue is confirmed resolved.
+//
+// Mutating req.headers.accept alone is NOT sufficient — confirmed via the
+// X-Debug-Accept-Override diagnostic header: the middleware ran, but the SDK
+// still rejected with 406. The SDK's transport reads the Accept header from
+// Node's raw header pairs (req.rawHeaders), not the parsed req.headers object,
+// so we patch both.
 app.post("/mcp", (req, res, next) => {
-  req.headers.accept = "application/json, text/event-stream";
-  res.setHeader("X-Debug-Accept-Override", "applied");
+  const FORCED_ACCEPT = "application/json, text/event-stream";
+
+  // Patch the parsed headers object (what req.headers.accept / req.get() return)
+  req.headers.accept = FORCED_ACCEPT;
+
+  // Patch Node's raw header array — alternating [name, value, name, value, ...]
+  // as received over the wire. This is what some libraries read directly
+  // instead of the normalized req.headers object.
+  if (Array.isArray(req.rawHeaders)) {
+    let found = false;
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      if (req.rawHeaders[i].toLowerCase() === "accept") {
+        req.rawHeaders[i + 1] = FORCED_ACCEPT;
+        found = true;
+      }
+    }
+    if (!found) {
+      req.rawHeaders.push("Accept", FORCED_ACCEPT);
+    }
+  }
+
   next();
 }, async (req, res) => {
   const transport = new StreamableHTTPServerTransport({
