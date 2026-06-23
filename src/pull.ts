@@ -1,4 +1,4 @@
-import { fetchAllPages, fetchProfile, fetchBody } from "./whoop.js";
+import { fetchAllPages, fetchProfile, fetchBody, fetchRecoveryForCycle } from "./whoop.js";
 import {
   readHistory, writeHistory, readStatus, writeStatus,
   buildCoverage, computeCoverage,
@@ -296,6 +296,117 @@ export async function runDateRangePull(start: string, end: string, force = false
     history.pulledAt = new Date().toISOString();
     history.coverage = buildCoverage(history);
     writeHistory(history);
+    status.inProgress = false;
+    status.error = msg;
+    writeStatus(status);
+  }
+}
+
+// ─── Recovery backfill (per-cycle lookup, bypasses collection endpoint) ───────
+//
+// /v2/recovery (the paginated collection endpoint used by runFullPull and
+// runDateRangePull) has been observed to silently stop returning records
+// before a known historical boundary, even with explicit early start/end
+// bounds — despite recovery data being confirmed present in the Whoop app
+// for dates beyond that boundary.
+//
+// /v2/cycle/{cycleId}/recovery is a direct per-cycle lookup — a completely
+// different server-side code path. This function walks every cached cycle
+// in the target window that doesn't already have a matched recovery, and
+// queries this endpoint individually. A 404 (no recovery for that cycle) is
+// expected and not an error — it simply means no recovery exists.
+//
+// Defaults to the known gap window if start/end aren't provided. Requires
+// an existing history cache (run whoop_full_history first) since it reads
+// cycle IDs from the cache rather than re-fetching the cycle collection.
+
+const KNOWN_RECOVERY_GAP_START = "2022-01-18";
+const KNOWN_RECOVERY_GAP_END   = "2023-01-24";
+
+export async function runRecoveryBackfill(start?: string, end?: string): Promise<void> {
+  const existingStatus = readStatus();
+  if (existingStatus.inProgress) {
+    console.log("[backfill] Pull already in progress, skipping");
+    return;
+  }
+
+  const history = readHistory();
+  if (!history) {
+    const msg = "No history cache found. Run whoop_full_history first.";
+    console.error("[backfill]", msg);
+    writeStatus({
+      inProgress: false, startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+      error: msg, mode: "recovery_backfill", requestedStart: null, requestedEnd: null,
+      counts:  { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
+      fetched: { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
+    });
+    return;
+  }
+
+  const backfillStart = start ?? KNOWN_RECOVERY_GAP_START;
+  const backfillEnd   = end   ?? KNOWN_RECOVERY_GAP_END;
+
+  const status: PullStatus = {
+    inProgress:     true,
+    startedAt:      new Date().toISOString(),
+    completedAt:    null,
+    error:          null,
+    mode:           "recovery_backfill",
+    requestedStart: backfillStart,
+    requestedEnd:   backfillEnd,
+    counts:  { cycles: history.cycles.length, recoveries: history.recoveries.length, sleeps: history.sleeps.length, workouts: history.workouts.length },
+    fetched: { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
+  };
+  writeStatus(status);
+
+  try {
+    const targetCycles = history.cycles.filter(c => {
+      const d = recordDate(c);
+      return d >= backfillStart && d <= backfillEnd;
+    });
+
+    const existingCycleIds = new Set(history.recoveries.map(recordId));
+    const toCheck = targetCycles.filter(c => !existingCycleIds.has(recordId(c)));
+
+    console.log(`[backfill] ${targetCycles.length} cycles in range, ${toCheck.length} missing recovery — checking individually...`);
+
+    const newRecoveries: Record<string, unknown>[] = [];
+    let checked = 0;
+
+    for (const cycle of toCheck) {
+      const cycleId = cycle["id"] as number;
+      const recovery = await fetchRecoveryForCycle(cycleId);
+      checked++;
+
+      if (recovery) {
+        newRecoveries.push(recovery);
+        console.log(`[backfill] Found recovery for cycle ${cycleId} (${recordDate(cycle)})`);
+      }
+
+      status.fetched.recoveries = newRecoveries.length;
+      writeStatus(status);
+
+      // Polite delay between individual per-cycle lookups
+      if (checked < toCheck.length) await new Promise(r => setTimeout(r, 200));
+    }
+
+    const { merged, added } = mergeRecords(history.recoveries, newRecoveries);
+    history.recoveries = merged;
+    history.pulledAt = new Date().toISOString();
+    history.coverage = buildCoverage(history);
+    writeHistory(history);
+
+    status.inProgress    = false;
+    status.completedAt   = new Date().toISOString();
+    status.fetched.recoveries = added;
+    status.counts.recoveries  = history.recoveries.length;
+    writeStatus(status);
+
+    console.log(`[backfill] Complete. Checked ${checked} cycles, found ${added} new recovery records.`);
+
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[backfill] Failed:", msg);
     status.inProgress = false;
     status.error = msg;
     writeStatus(status);
