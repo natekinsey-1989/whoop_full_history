@@ -1,303 +1,236 @@
-import { fetchAllPages, fetchProfile, fetchBody } from "./whoop.js";
-import {
-  readHistory, writeHistory, readStatus, writeStatus,
-  buildCoverage, computeCoverage,
-} from "./store.js";
-import type { PullStatus, HistoryStore, CoverageEntry } from "./types.js";
+import { getValidAccessToken } from "./token.js";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const BASE = "https://api.prod.whoop.com/developer/v2";
 
-function recordId(r: Record<string, unknown>): string {
-  // Cycles use id, recoveries use cycle_id, sleeps use id, workouts use id
-  return String(r["id"] ?? r["cycle_id"] ?? "");
+// Official Whoop sport ID map — sourced from developer.whoop.com/docs/developing/user-data/workout/
+// Note: sport_id is deprecated after 09/01/2025. Prefer sport_name from the workout record directly.
+export const SPORT_MAP: Record<number, string> = {
+  [-1]: "Activity",
+  0:   "Running",
+  1:   "Cycling",
+  16:  "Baseball",
+  17:  "Basketball",
+  18:  "Rowing",
+  19:  "Fencing",
+  20:  "Field Hockey",
+  21:  "Football",
+  22:  "Golf",
+  24:  "Ice Hockey",
+  25:  "Lacrosse",
+  27:  "Rugby",
+  28:  "Sailing",
+  29:  "Skiing",
+  30:  "Soccer",
+  31:  "Softball",
+  32:  "Squash",
+  33:  "Swimming",
+  34:  "Tennis",
+  35:  "Track & Field",
+  36:  "Volleyball",
+  37:  "Water Polo",
+  38:  "Wrestling",
+  39:  "Boxing",
+  42:  "Dance",
+  43:  "Pilates",
+  44:  "Yoga",
+  45:  "Weightlifting",
+  47:  "Cross Country Skiing",
+  48:  "Functional Fitness",
+  49:  "Duathlon",
+  51:  "Gymnastics",
+  52:  "Hiking/Rucking",
+  53:  "Horseback Riding",
+  55:  "Kayaking",
+  56:  "Martial Arts",
+  57:  "Mountain Biking",
+  59:  "Powerlifting",
+  60:  "Rock Climbing",
+  61:  "Paddleboarding",
+  62:  "Triathlon",
+  63:  "Walking",
+  64:  "Surfing",
+  65:  "Elliptical",
+  66:  "Stairmaster",
+  70:  "Meditation",
+  71:  "Hot Shower",
+  73:  "Diving",
+  74:  "Operations - Tactical",
+  75:  "Operations - Medical",
+  76:  "Operations - Flying",
+  77:  "Operations - Water",
+  82:  "Ultimate",
+  83:  "Climber",
+  84:  "Jumping Rope",
+  85:  "Australian Football",
+  86:  "Skateboarding",
+  87:  "Coaching",
+  88:  "Ice Bath",
+  89:  "Commuting",
+  90:  "Gaming",
+  91:  "Snowboarding",
+  92:  "Motocross",
+  93:  "Caddying",
+  94:  "Obstacle Course Racing",
+  95:  "Motor Racing",
+  96:  "HIIT",
+  97:  "Spin",
+  98:  "Jiu Jitsu",
+  99:  "Manual Labor",
+  100: "Cricket",
+  101: "Pickleball",
+  102: "Inline Skating",
+  103: "Box Fitness",
+  104: "Spikeball",
+  105: "Wheelchair Pushing",
+  106: "Paddle Tennis",
+  107: "Barre",
+  108: "Stage Performance",
+  109: "High Stress Work",
+  110: "Parkour",
+  111: "Gaelic Football",
+  112: "Hurling/Camogie",
+  113: "Circus Arts",
+  121: "Massage Therapy",
+  123: "Strength Trainer",
+  125: "Watching Sports",
+  126: "Assault Bike",
+  127: "Kickboxing",
+  128: "Stretching",
+  230: "Table Tennis",
+  231: "Badminton",
+  232: "Netball",
+  233: "Sauna",
+  234: "Disc Golf",
+  235: "Yard Work",
+  236: "Air Compression",
+  237: "Percussive Massage",
+  238: "Paintball",
+  239: "Ice Skating",
+  240: "Handball",
+  248: "F45 Training",
+  249: "Padel",
+  250: "Barry's",
+  251: "Dedicated Parenting",
+  252: "Stroller Walking",
+  253: "Stroller Jogging",
+  254: "Toddlerwearing",
+  255: "Babywearing",
+  258: "Barre3",
+  259: "Hot Yoga",
+  261: "Stadium Steps",
+  262: "Polo",
+  263: "Musical Performance",
+  264: "Kite Boarding",
+  266: "Dog Walking",
+  267: "Water Skiing",
+  268: "Wakeboarding",
+  269: "Cooking",
+  270: "Cleaning",
+  272: "Public Speaking",
+  275: "Driving",
+  // ── Add new IDs here as Whoop expands the sport list ──────────────────────
+  // HOT SHOWER: add the Whoop-assigned sport ID here once confirmed, e.g.:
+  // XXX: "Hot Shower",
+};
+
+interface PagedResponse<T> {
+  records: T[];
+  next_token: string | null;
 }
 
-function recordDate(r: Record<string, unknown>): string {
-  return ((r["start"] ?? r["created_at"] ?? "") as string).split("T")[0];
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Determine what date range to fetch from the Whoop API given what's cached.
-// Returns null if the entire requested range is already covered.
-function rangeToFetch(
-  coverage: CoverageEntry | undefined,
-  requestedStart: string,
-  requestedEnd: string
-): { start: string; end: string } | null {
-  if (!coverage || !coverage.min || !coverage.max) {
-    // Nothing cached — fetch everything requested
-    return { start: requestedStart, end: requestedEnd };
+// ─── HTTP with retry ──────────────────────────────────────────────────────────
+
+async function getWithRetry<T>(path: string, attempt = 0): Promise<T> {
+  const token = await getValidAccessToken();
+  const res = await fetch(`${BASE}${path}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get("retry-after") ?? "60", 10);
+    const waitMs = Math.max(retryAfter * 1000, 1000) * Math.pow(2, attempt);
+    console.log(`[whoop] 429 rate limit on ${path}, waiting ${Math.round(waitMs / 1000)}s (attempt ${attempt + 1})`);
+    await sleep(waitMs);
+    if (attempt < 5) return getWithRetry<T>(path, attempt + 1);
+    throw new Error(`Rate limit exceeded after 5 retries on ${path}`);
   }
 
-  // Requested range fully inside cached coverage → nothing to fetch
-  if (requestedStart >= coverage.min && requestedEnd <= coverage.max) {
-    return null;
+  if (!res.ok) {
+    throw new Error(`Whoop API ${res.status} on ${path}: ${await res.text()}`);
   }
 
-  // Fetch only the portions outside cached coverage.
-  // Simple strategy: fetch from requestedStart up to coverage.min (if earlier)
-  // AND from coverage.max up to requestedEnd (if later).
-  // We make one contiguous fetch covering the full uncovered span to keep it simple.
-  const fetchStart = requestedStart < coverage.min ? requestedStart : coverage.max;
-  const fetchEnd   = requestedEnd   > coverage.max ? requestedEnd   : coverage.min;
-
-  if (fetchStart > fetchEnd) return null; // nothing to do
-  return { start: fetchStart, end: fetchEnd };
+  return res.json() as Promise<T>;
 }
 
-// Merge new records into existing, deduplicating by id/cycle_id
-function mergeRecords(
-  existing: Record<string, unknown>[],
-  incoming: Record<string, unknown>[]
-): { merged: Record<string, unknown>[]; added: number } {
-  const seen = new Set(existing.map(recordId));
-  const novel = incoming.filter(r => !seen.has(recordId(r)));
-  return {
-    merged: [...existing, ...novel],
-    added:  novel.length,
-  };
+// ─── Paginated fetch ──────────────────────────────────────────────────────────
+// start/end are YYYY-MM-DD strings. When provided they are passed to the
+// Whoop API as start and end query params so only the requested window is
+// fetched — avoiding a full history scan for small incremental syncs.
+
+export async function fetchAllPages<T>(
+  endpoint: string,
+  opts: { start?: string; end?: string; onPage?: (count: number) => void } = {}
+): Promise<T[]> {
+  const all: T[] = [];
+  let nextToken: string | null = null;
+  let page = 0;
+
+  do {
+    const params = new URLSearchParams({ limit: "25" });
+    if (nextToken)  params.set("nextToken", nextToken);
+    // Whoop API accepts start/end as ISO datetime strings
+    if (opts.start) params.set("start", `${opts.start}T00:00:00.000Z`);
+    if (opts.end)   params.set("end",   `${opts.end}T23:59:59.999Z`);
+
+    const data = await getWithRetry<PagedResponse<T>>(`${endpoint}?${params.toString()}`);
+    all.push(...data.records);
+    nextToken = data.next_token;
+    page++;
+
+    if (opts.onPage) opts.onPage(all.length);
+    if (nextToken) await sleep(500); // polite delay between pages
+  } while (nextToken);
+
+  console.log(`[whoop] ${endpoint}: fetched ${all.length} records in ${page} pages`);
+  return all;
 }
 
-// ─── Full pull (initial baseline or forced re-pull) ───────────────────────────
-//
-// IMPORTANT: We explicitly bound every fetch with a wide-open date range
-// (FULL_PULL_START → today) rather than omitting start/end entirely.
-//
-// Whoop's docs state that omitting `start` returns "no minimum time filter" —
-// i.e. the complete unbounded history. In practice, an unbounded nextToken
-// walk on /recovery was observed to silently stop (next_token absent, no
-// error) far short of the user's actual data — recovery data confirmed to
-// exist in the Whoop app for dates the unfiltered pull never reached.
-// Explicit start/end bounds route through the same query path validated by
-// runDateRangePull, which does not exhibit this truncation.
-//
-// FULL_PULL_START predates any possible Whoop device usage — adjust down if
-// you have a known earliest-possible date, but err on the early side.
+// ─── Profile / body ───────────────────────────────────────────────────────────
 
-const FULL_PULL_START = "2010-01-01";
-
-function todayIso(): string {
-  return new Date().toISOString().split("T")[0];
+export async function fetchProfile(): Promise<Record<string, unknown>> {
+  return getWithRetry<Record<string, unknown>>("/user/profile/basic");
 }
 
-export async function runFullPull(): Promise<void> {
-  const existing = readStatus();
-  if (existing.inProgress) {
-    console.log("[pull] Already in progress, skipping");
-    return;
-  }
+export async function fetchBody(): Promise<Record<string, unknown>> {
+  return getWithRetry<Record<string, unknown>>("/user/measurement/body");
+}
 
-  const end = todayIso();
+// ─── Per-cycle recovery lookup ────────────────────────────────────────────────
+// Direct lookup via GET /cycle/{cycleId}/recovery — a completely different
+// code path from the paginated /recovery collection endpoint. Used as a
+// backfill mechanism: the collection endpoint has been observed to silently
+// stop returning records past a certain historical point even when queried
+// with explicit early start/end bounds, while data is confirmed to exist in
+// the Whoop app for those dates. Per-cycle lookup may not share this limit.
+//
+// Returns null (not an error) if no recovery exists for this cycle — that's
+// a legitimate, expected response (e.g. cycle was unscorable, or recovery
+// genuinely never existed), distinct from an actual API failure.
 
-  const status: PullStatus = {
-    inProgress:     true,
-    startedAt:      new Date().toISOString(),
-    completedAt:    null,
-    error:          null,
-    mode:           "full",
-    requestedStart: FULL_PULL_START,
-    requestedEnd:   end,
-    counts:  { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
-    fetched: { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
-  };
-  writeStatus(status);
-
-  let cycles:     Record<string, unknown>[] = [];
-  let recoveries: Record<string, unknown>[] = [];
-  let sleeps:     Record<string, unknown>[] = [];
-  let workouts:   Record<string, unknown>[] = [];
-  let profile:    Record<string, unknown> | null = null;
-  let body:       Record<string, unknown> | null = null;
-
+export async function fetchRecoveryForCycle(cycleId: number): Promise<Record<string, unknown> | null> {
   try {
-    console.log("[pull:full] Fetching profile...");
-    profile = await fetchProfile().catch(() => null);
-    body    = await fetchBody().catch(() => null);
-
-    console.log(`[pull:full] Fetching cycles ${FULL_PULL_START} → ${end}...`);
-    cycles = await fetchAllPages<Record<string, unknown>>("/cycle", {
-      start: FULL_PULL_START, end,
-      onPage: n => { status.counts.cycles = n; writeStatus(status); },
-    });
-    status.fetched.cycles = cycles.length;
-    writeHistory({ pulledAt: new Date().toISOString(), profile, body, cycles, recoveries, sleeps, workouts });
-
-    console.log(`[pull:full] Fetching recoveries ${FULL_PULL_START} → ${end}...`);
-    recoveries = await fetchAllPages<Record<string, unknown>>("/recovery", {
-      start: FULL_PULL_START, end,
-      onPage: n => { status.counts.recoveries = n; writeStatus(status); },
-    });
-    status.fetched.recoveries = recoveries.length;
-    writeHistory({ pulledAt: new Date().toISOString(), profile, body, cycles, recoveries, sleeps, workouts });
-
-    console.log(`[pull:full] Fetching sleeps ${FULL_PULL_START} → ${end}...`);
-    sleeps = await fetchAllPages<Record<string, unknown>>("/activity/sleep", {
-      start: FULL_PULL_START, end,
-      onPage: n => { status.counts.sleeps = n; writeStatus(status); },
-    });
-    status.fetched.sleeps = sleeps.length;
-    writeHistory({ pulledAt: new Date().toISOString(), profile, body, cycles, recoveries, sleeps, workouts });
-
-    console.log(`[pull:full] Fetching workouts ${FULL_PULL_START} → ${end}...`);
-    workouts = await fetchAllPages<Record<string, unknown>>("/activity/workout", {
-      start: FULL_PULL_START, end,
-      onPage: n => { status.counts.workouts = n; writeStatus(status); },
-    });
-    status.fetched.workouts = workouts.length;
-
-    const store: HistoryStore = {
-      pulledAt: new Date().toISOString(),
-      profile, body, cycles, recoveries, sleeps, workouts,
-    };
-    store.coverage = buildCoverage(store);
-    writeHistory(store);
-
-    status.inProgress   = false;
-    status.completedAt  = new Date().toISOString();
-    status.counts       = { cycles: cycles.length, recoveries: recoveries.length, sleeps: sleeps.length, workouts: workouts.length };
-    writeStatus(status);
-    console.log("[pull:full] Complete:", status.counts);
-
+    return await getWithRetry<Record<string, unknown>>(`/cycle/${cycleId}/recovery`);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[pull:full] Failed:", msg);
-    const partial: HistoryStore = { pulledAt: new Date().toISOString(), profile, body, cycles, recoveries, sleeps, workouts };
-    partial.coverage = buildCoverage(partial);
-    writeHistory(partial);
-    status.inProgress = false;
-    status.error = msg;
-    status.counts = { cycles: cycles.length, recoveries: recoveries.length, sleeps: sleeps.length, workouts: workouts.length };
-    writeStatus(status);
-  }
-}
-
-// ─── Date-range pull (incremental sync, smart cache merge) ───────────────────
-// start/end are YYYY-MM-DD strings.
-// - Checks coverage metadata per data type
-// - Only fetches from Whoop API what isn't already cached
-// - Merges new records into existing cache by id/cycle_id deduplication
-// - Updates coverage metadata after merge
-
-export async function runDateRangePull(start: string, end: string, force = false): Promise<void> {
-  const existing = readStatus();
-  if (existing.inProgress) {
-    console.log("[pull] Already in progress, skipping");
-    return;
-  }
-
-  const status: PullStatus = {
-    inProgress:     true,
-    startedAt:      new Date().toISOString(),
-    completedAt:    null,
-    error:          null,
-    mode:           force ? "force" : "incremental",
-    requestedStart: start,
-    requestedEnd:   end,
-    counts:  { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
-    fetched: { cycles: 0, recoveries: 0, sleeps: 0, workouts: 0 },
-  };
-  writeStatus(status);
-
-  // Load existing cache (may be null if this is first run — fall back to empty)
-  const history = readHistory() ?? {
-    pulledAt: new Date().toISOString(),
-    profile: null,
-    body: null,
-    cycles: [],
-    recoveries: [],
-    sleeps: [],
-    workouts: [],
-  };
-
-  const cov = history.coverage;
-
-  try {
-    // ── Cycles ──
-    const cycleRange = force ? { start, end } : rangeToFetch(cov?.cycles, start, end);
-    if (cycleRange) {
-      console.log(`[pull:incremental] Fetching cycles ${cycleRange.start} → ${cycleRange.end}`);
-      const incoming = await fetchAllPages<Record<string, unknown>>("/cycle", {
-        start: cycleRange.start, end: cycleRange.end,
-        onPage: n => { status.counts.cycles = n; writeStatus(status); },
-      });
-      const { merged, added } = mergeRecords(history.cycles, incoming);
-      history.cycles = merged;
-      status.fetched.cycles = added;
-      console.log(`[pull:incremental] Cycles: fetched ${incoming.length}, added ${added} new`);
-    } else {
-      console.log("[pull:incremental] Cycles: fully cached, skipping API call");
+    if (err instanceof Error && /Whoop API 404/.test(err.message)) {
+      return null;
     }
-    status.counts.cycles = history.cycles.length;
-
-    // ── Recoveries ──
-    const recoveryRange = force ? { start, end } : rangeToFetch(cov?.recoveries, start, end);
-    if (recoveryRange) {
-      console.log(`[pull:incremental] Fetching recoveries ${recoveryRange.start} → ${recoveryRange.end}`);
-      const incoming = await fetchAllPages<Record<string, unknown>>("/recovery", {
-        start: recoveryRange.start, end: recoveryRange.end,
-        onPage: n => { status.counts.recoveries = n; writeStatus(status); },
-      });
-      const { merged, added } = mergeRecords(history.recoveries, incoming);
-      history.recoveries = merged;
-      status.fetched.recoveries = added;
-      console.log(`[pull:incremental] Recoveries: fetched ${incoming.length}, added ${added} new`);
-    } else {
-      console.log("[pull:incremental] Recoveries: fully cached, skipping API call");
-    }
-    status.counts.recoveries = history.recoveries.length;
-
-    // ── Sleeps ──
-    const sleepRange = force ? { start, end } : rangeToFetch(cov?.sleeps, start, end);
-    if (sleepRange) {
-      console.log(`[pull:incremental] Fetching sleeps ${sleepRange.start} → ${sleepRange.end}`);
-      const incoming = await fetchAllPages<Record<string, unknown>>("/activity/sleep", {
-        start: sleepRange.start, end: sleepRange.end,
-        onPage: n => { status.counts.sleeps = n; writeStatus(status); },
-      });
-      const { merged, added } = mergeRecords(history.sleeps, incoming);
-      history.sleeps = merged;
-      status.fetched.sleeps = added;
-      console.log(`[pull:incremental] Sleeps: fetched ${incoming.length}, added ${added} new`);
-    } else {
-      console.log("[pull:incremental] Sleeps: fully cached, skipping API call");
-    }
-    status.counts.sleeps = history.sleeps.length;
-
-    // ── Workouts ──
-    const workoutRange = force ? { start, end } : rangeToFetch(cov?.workouts, start, end);
-    if (workoutRange) {
-      console.log(`[pull:incremental] Fetching workouts ${workoutRange.start} → ${workoutRange.end}`);
-      const incoming = await fetchAllPages<Record<string, unknown>>("/activity/workout", {
-        start: workoutRange.start, end: workoutRange.end,
-        onPage: n => { status.counts.workouts = n; writeStatus(status); },
-      });
-      const { merged, added } = mergeRecords(history.workouts, incoming);
-      history.workouts = merged;
-      status.fetched.workouts = added;
-      console.log(`[pull:incremental] Workouts: fetched ${incoming.length}, added ${added} new`);
-    } else {
-      console.log("[pull:incremental] Workouts: fully cached, skipping API call");
-    }
-    status.counts.workouts = history.workouts.length;
-
-    // ── Write merged cache with updated coverage ──
-    history.pulledAt = new Date().toISOString();
-    history.coverage = buildCoverage(history);
-    writeHistory(history);
-
-    status.inProgress  = false;
-    status.completedAt = new Date().toISOString();
-    writeStatus(status);
-    console.log("[pull:incremental] Complete. Fetched:", status.fetched, "Cache totals:", status.counts);
-
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[pull:incremental] Failed:", msg);
-    // Save whatever merged so far
-    history.pulledAt = new Date().toISOString();
-    history.coverage = buildCoverage(history);
-    writeHistory(history);
-    status.inProgress = false;
-    status.error = msg;
-    writeStatus(status);
+    throw err;
   }
 }
