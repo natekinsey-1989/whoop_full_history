@@ -259,8 +259,35 @@ async function handleQuery(args) {
   var endDate = (args && args.end) || today();
   var startDate = (args && args.start) || daysAgo(90);
 
+  if (rawType === "recovery") {
+    // Recovery records have no date of their own — only created_at (when the
+    // score was computed) and cycle_id (which physiological cycle it belongs
+    // to). created_at can lag far behind the actual cycle date if Whoop
+    // re-scores or migrates records, silently breaking date-range filtering.
+    // Resolve each recovery's effective date through its parent cycle's
+    // start date instead.
+    var cycleStartById = {};
+    history.cycles.forEach(function(c) {
+      var d = (c.start || "").split("T")[0];
+      if (c.id != null && d) cycleStartById[c.id] = d;
+    });
+
+    var recoveryRecords = history.recoveries
+      .filter(function(r) {
+        var d = cycleStartById[r.cycle_id];
+        return d && d >= startDate && d <= endDate;
+      })
+      .slice(0, 365);
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ type: rawType, start: startDate, end: endDate, count: recoveryRecords.length, records: recoveryRecords }, null, 2),
+      }],
+    };
+  }
+
   var recordMap = {
-    recovery: history.recoveries,
     sleep: history.sleeps,
     cycles: history.cycles,
     workouts: history.workouts,
